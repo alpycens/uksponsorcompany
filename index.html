@@ -211,6 +211,14 @@
   }
   .tick input{accent-color:var(--go);width:16px;height:16px;cursor:pointer}
   .row.done .tick{color:var(--go)}
+  .acts{display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+  .save{
+    border:1px solid var(--line);background:#fff;color:var(--steel);
+    border-radius:7px;padding:5px 11px;cursor:pointer;
+    font-family:var(--mono);font-size:11.5px;letter-spacing:.03em;white-space:nowrap;
+  }
+  .save:hover{border-color:var(--amber);color:var(--ink)}
+  .save.on{background:#fdf3dc;border-color:#f0dca6;color:var(--amber-deep)}
   .name{
     font-size:17px;font-weight:700;letter-spacing:-.01em;
     grid-column:1;margin:0;
@@ -308,7 +316,9 @@
   </div>
   <label class="scope"><input type="checkbox" id="scope" checked> Şehir / bölgede de ara</label>
   <span class="sep"></span>
-  <label class="scope"><input type="checkbox" id="onlyContacted"> Sadece irtibata geçilenler</label>
+  <label class="scope"><input type="checkbox" id="onlySaved"> Listem</label>
+  <span class="count" id="cSaved"></span>
+  <label class="scope"><input type="checkbox" id="onlyContacted"> İrtibata geçilenler</label>
   <span class="count" id="cContacted"></span>
   <button class="exportb" id="exportBtn" type="button">DIŞA AKTAR (CSV)</button>
 </div>
@@ -342,8 +352,11 @@
   var CAP  = 500;
 
   var SKEY = 'ukspon_contacted_v1';
+  var SKEY2= 'ukspon_saved_v1';
   var CONTACTED = new Set();
+  var SAVED = new Set();
   var cityKey = null;     // selected city (normalized) or null
+  var lastMatches = [];   // full match index list for the current view (for export)
 
   var loader = document.getElementById('loader');
   var view   = document.getElementById('view');
@@ -352,7 +365,9 @@
   var scopeB = document.getElementById('scope');
   var countEl= document.getElementById('count');
   var onlyC  = document.getElementById('onlyContacted');
+  var onlyS  = document.getElementById('onlySaved');
   var cCont  = document.getElementById('cContacted');
+  var cSaved = document.getElementById('cSaved');
   var exportB= document.getElementById('exportBtn');
   var cityIn = document.getElementById('city');
   var cityClr= document.getElementById('cityClear');
@@ -361,22 +376,16 @@
   function nfmt(n){ return n.toLocaleString('en-GB'); }
   function normCity(s){ return (s||'').trim().replace(/\s+/g,' ').toLowerCase(); }
 
-  // ---- contacted persistence ----
+  // ---- persistence (contacted + saved list) ----
   function keyOf(r){ return r[0]+'\u0001'+r[1]+'\u0001'+r[2]+'\u0001'+r[3]; }
-  function loadContacted(){
-    try{
-      var raw = localStorage.getItem(SKEY);
-      if(raw){ JSON.parse(raw).forEach(function(k){ CONTACTED.add(k); }); }
-    }catch(e){/* storage yok / engelli - oturum içi çalışır */}
+  function loadSets(){
+    try{ var a=localStorage.getItem(SKEY);  if(a) JSON.parse(a).forEach(function(k){CONTACTED.add(k);}); }catch(e){}
+    try{ var b=localStorage.getItem(SKEY2); if(b) JSON.parse(b).forEach(function(k){SAVED.add(k);}); }catch(e){}
   }
-  function saveContacted(){
-    try{ localStorage.setItem(SKEY, JSON.stringify(Array.from(CONTACTED))); }catch(e){}
-  }
-  function updateContacted(){
-    var n = CONTACTED.size;
-    cCont.innerHTML = "İrtibata geçilen: <b>"+nfmt(n)+"</b>";
-    exportB.style.display = n ? 'inline-block' : 'none';
-  }
+  function saveContacted(){ try{ localStorage.setItem(SKEY,  JSON.stringify(Array.from(CONTACTED))); }catch(e){} }
+  function saveSaved(){     try{ localStorage.setItem(SKEY2, JSON.stringify(Array.from(SAVED)));     }catch(e){} }
+  function updateContacted(){ cCont.innerHTML = "İrtibatlı: <b>"+nfmt(CONTACTED.size)+"</b>"; }
+  function updateSaved(){     cSaved.innerHTML = "Listem: <b>"+nfmt(SAVED.size)+"</b>"; }
 
   // ---- decode embedded gzip+base64 ----
   function loadData(){
@@ -395,11 +404,12 @@
       var text = new TextDecoder('utf-8').decode(buf);
       RECS = JSON.parse(text);
       buildIndex();
-      loadContacted();
+      loadSets();
       loader.hidden = true;
       view.hidden = false;
       countEl.innerHTML = "Toplam <b>" + nfmt(RECS.length) + "</b> şirket";
       updateContacted();
+      updateSaved();
       showHint();
       qEl.focus();
     }).catch(function(e){
@@ -478,7 +488,9 @@
 
   function rowHTML(i, toks){
     var r = RECS[i];
-    var done = CONTACTED.has(keyOf(r));
+    var k = keyOf(r);
+    var done = CONTACTED.has(k);
+    var saved = SAVED.has(k);
     var loc = [r[1], r[2]].filter(Boolean).join(', ');
     var routes = r[4] && r[4].length
       ? '<div class="routes">' + r[4].map(function(x){return '<span class="route">'+esc(x)+'</span>';}).join('') + '</div>'
@@ -489,7 +501,10 @@
       + '<div class="badges">'
       +   '<span class="rating '+ratingClass(r[3])+'">'+esc(ratingLabel(r[3]))+'</span>'
       +   routes
-      +   '<label class="tick"><input type="checkbox" class="tickbox" data-i="'+i+'"'+(done?' checked':'')+'> İrtibata geçildi</label>'
+      +   '<div class="acts">'
+      +     '<button type="button" class="save'+(saved?' on':'')+'" data-i="'+i+'">'+(saved?'Listede':'Listeye ekle')+'</button>'
+      +     '<label class="tick"><input type="checkbox" class="tickbox" data-i="'+i+'"'+(done?' checked':'')+'> İrtibata geçildi</label>'
+      +   '</div>'
       + '</div>'
       + '</li>';
   }
@@ -500,12 +515,13 @@
   function contextCities(){
     var raw = qEl.value.trim().toLowerCase();
     var onlyContacted = onlyC.checked;
-    var sig = raw + '|' + (onlyContacted?1:0) + '|' + (scopeB.checked?1:0);
+    var onlySaved = onlyS.checked;
+    var sig = raw + '|' + (onlyContacted?1:0) + '|' + (onlySaved?1:0) + '|' + (scopeB.checked?1:0);
     if (sig === ctxSig) return ctxCities;
     ctxSig = sig;
 
     var toks = raw ? raw.split(/\s+/).filter(Boolean) : [];
-    if (!toks.length && !onlyContacted){ ctxCities = CITIES; return ctxCities; }
+    if (!toks.length && !onlyContacted && !onlySaved){ ctxCities = CITIES; return ctxCities; }
 
     var src = scopeB.checked ? LCF : LC;
     var counts = new Map();
@@ -516,6 +532,7 @@
         if (!ok) continue;
       }
       if (onlyContacted && !CONTACTED.has(keyOf(RECS[i]))) continue;
+      if (onlySaved && !SAVED.has(keyOf(RECS[i]))) continue;
       var tk = LCT[i]; if (!tk) continue;
       counts.set(tk, (counts.get(tk)||0) + 1);
     }
@@ -562,12 +579,15 @@
     clearB.style.display = qEl.value ? 'inline-block' : 'none';
     if (!cityPan.hidden) renderCityPanel(); // keep city counts in sync with search
     var onlyContacted = onlyC.checked;
+    var onlySaved = onlyS.checked;
     var toks = raw ? raw.split(/\s+/).filter(Boolean) : [];
 
     // nothing active -> intro hint
-    if (!toks.length && !onlyContacted && !cityKey){
+    if (!toks.length && !onlyContacted && !onlySaved && !cityKey){
       showHint();
       countEl.innerHTML = "Toplam <b>"+nfmt(RECS.length)+"</b> şirket";
+      lastMatches = [];
+      exportB.style.display = 'none';
       return;
     }
 
@@ -585,25 +605,32 @@
         if (!ok) continue;
       }
       if (onlyContacted && !CONTACTED.has(keyOf(RECS[i]))) continue;
+      if (onlySaved && !SAVED.has(keyOf(RECS[i]))) continue;
       matches.push(i);
-      if (matches.length > 20000) break; // safety
     }
 
+    lastMatches = matches;
     var total = matches.length;
+
     var chips = [];
+    if (onlySaved) chips.push("Listem");
+    if (onlyContacted) chips.push("İrtibatlı");
     if (raw) chips.push("\u201C"+esc(qEl.value.trim())+"\u201D");
     if (cityKey) chips.push(esc(cityIn.value.trim()));
     var suffix = chips.length ? " — " + chips.join(" \u00b7 ") : "";
-    var label = onlyContacted ? " irtibata geçilen" : " sonuç";
-    countEl.innerHTML = "<b>"+nfmt(total)+"</b>"+label+suffix;
+    countEl.innerHTML = "<b>"+nfmt(total)+"</b> sonuç"+suffix;
 
     if (total === 0){
-      var msg = onlyContacted
-        ? (raw || cityKey ? "Bu filtreyle işaretli şirket yok." : "Henüz kimse işaretlenmedi. Sonuçlardaki kutuyu tıklayarak irtibata geçtiklerini işaretle.")
-        : "Farklı bir kelime dene ya da şehri değiştir.";
+      var msg;
+      if (onlySaved) msg = "Listen boş. Sonuçlarda \u201CListeye ekle\u201D ile şirket ekleyebilirsin.";
+      else if (onlyContacted) msg = "İşaretli şirket yok. Sonuçlardaki kutuyu tıklayarak irtibata geçtiklerini işaretle.";
+      else msg = "Farklı bir kelime dene ya da şehri değiştir.";
       view.innerHTML = '<div class="empty"><b>Sonuç yok.</b><br>'+msg+'</div>';
+      exportB.style.display = 'none';
       return;
     }
+
+    exportB.style.display = 'inline-block';
 
     var shown = Math.min(total, CAP);
     var html = '<ul class="results">';
@@ -662,15 +689,29 @@
     if (onlyC.checked) run(); // dropped rows leave the filtered view
   });
 
-  // export contacted companies as CSV
+  // add / remove a company from "Listem" (event delegation)
+  view.addEventListener('click', function(e){
+    var b = e.target.closest ? e.target.closest('.save') : null;
+    if (!b) return;
+    var i = parseInt(b.getAttribute('data-i'), 10);
+    var k = keyOf(RECS[i]);
+    if (SAVED.has(k)){ SAVED.delete(k); b.classList.remove('on'); b.textContent = 'Listeye ekle'; }
+    else { SAVED.add(k); b.classList.add('on'); b.textContent = 'Listede'; }
+    saveSaved();
+    updateSaved();
+    ctxSig = null;
+    if (onlyS.checked) run(); // removed rows leave the list view
+  });
+
+  onlyS.addEventListener('change', run);
+
+  // export the current result set as CSV
   exportB.addEventListener('click', function(){
-    if (!CONTACTED.size) return;
+    if (!lastMatches.length) return;
     var rows = [['Organisation Name','Town/City','County','Type & Rating','Route']];
-    for (var i=0;i<RECS.length;i++){
-      var r = RECS[i];
-      if (CONTACTED.has(keyOf(r))){
-        rows.push([r[0], r[1], r[2], r[3], (r[4]||[]).join('; ')]);
-      }
+    for (var j=0;j<lastMatches.length;j++){
+      var r = RECS[lastMatches[j]];
+      rows.push([r[0], r[1], r[2], r[3], (r[4]||[]).join('; ')]);
     }
     var csv = rows.map(function(row){
       return row.map(function(c){
@@ -678,10 +719,13 @@
         return /[",\n\r]/.test(c) ? '"'+c.replace(/"/g,'""')+'"' : c;
       }).join(',');
     }).join('\r\n');
+    var name = onlyS.checked ? 'listem.csv'
+             : onlyC.checked ? 'irtibata-gecilenler.csv'
+             : 'sponsor-arama.csv';
     var blob = new Blob(['\ufeff'+csv], {type:'text/csv;charset=utf-8'});
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
-    a.href = url; a.download = 'irtibata-gecilenler.csv';
+    a.href = url; a.download = name;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
   });
