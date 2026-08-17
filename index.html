@@ -332,7 +332,10 @@
   var LC   = null;        // lowercase name
   var LCF  = null;        // lowercase name + town + county
   var LCT  = null;        // normalized town (for city filter)
-  var CITIES = [];        // [{key,disp,count}] sorted by count desc
+  var CITIES = [];        // [{key,disp,count}] sorted by count desc (global)
+  var CITYDISP = null;    // Map key -> display name
+  var ctxSig = null;      // cache signature for context city list
+  var ctxCities = null;   // cached city list for current search context
   var CAP  = 500;
 
   var SKEY = 'ukspon_contacted_v1';
@@ -421,7 +424,8 @@
       }
     }
     CITIES = [];
-    cm.forEach(function(o, key){ CITIES.push({key:key, disp:o.disp, count:o.count}); });
+    CITYDISP = new Map();
+    cm.forEach(function(o, key){ CITIES.push({key:key, disp:o.disp, count:o.count}); CITYDISP.set(key, o.disp); });
     CITIES.sort(function(a,b){ return b.count - a.count; });
   }
 
@@ -488,11 +492,49 @@
   }
 
   // ---- city combobox ----
+  // cities available under the CURRENT search context (text + contacted),
+  // ignoring the city filter itself, with per-city match counts. cached.
+  function contextCities(){
+    var raw = qEl.value.trim().toLowerCase();
+    var onlyContacted = onlyC.checked;
+    var sig = raw + '|' + (onlyContacted?1:0) + '|' + (scopeB.checked?1:0);
+    if (sig === ctxSig) return ctxCities;
+    ctxSig = sig;
+
+    var toks = raw ? raw.split(/\s+/).filter(Boolean) : [];
+    if (!toks.length && !onlyContacted){ ctxCities = CITIES; return ctxCities; }
+
+    var src = scopeB.checked ? LCF : LC;
+    var counts = new Map();
+    for (var i=0;i<RECS.length;i++){
+      if (toks.length){
+        var hay = src[i], ok = true;
+        for (var t=0;t<toks.length;t++){ if (hay.indexOf(toks[t]) === -1){ ok=false; break; } }
+        if (!ok) continue;
+      }
+      if (onlyContacted && !CONTACTED.has(keyOf(RECS[i]))) continue;
+      var tk = LCT[i]; if (!tk) continue;
+      counts.set(tk, (counts.get(tk)||0) + 1);
+    }
+    var out = [];
+    counts.forEach(function(c, key){ out.push({key:key, disp:(CITYDISP.get(key)||key), count:c}); });
+    out.sort(function(a,b){ return b.count - a.count; });
+    ctxCities = out;
+    return out;
+  }
+
   function renderCityPanel(){
+    var all = contextCities();
+    var scoped = (all !== CITIES); // list is limited by an active search
     var q = normCity(cityIn.value);
-    var list = q ? CITIES.filter(function(c){ return c.key.indexOf(q) > -1; }) : CITIES;
+    var list = q ? all.filter(function(c){ return c.key.indexOf(q) > -1; }) : all;
     var cap = 60;
-    var html = '<button type="button" class="cityopt reset" data-key="">Tüm şehirler</button>';
+    var html = '';
+    if (scoped){
+      var qtext = qEl.value.trim();
+      html += '<div class="citymore">'+(qtext ? '\u201C'+esc(qtext)+'\u201D aramasındaki şehirler' : 'İşaretlilerin bulunduğu şehirler')+'</div>';
+    }
+    html += '<button type="button" class="cityopt reset" data-key="">Tüm şehirler</button>';
     for (var i=0;i<Math.min(list.length,cap);i++){
       var c = list[i];
       html += '<button type="button" class="cityopt" data-key="'+encodeURIComponent(c.key)+'" data-disp="'+esc(c.disp)+'">'
@@ -515,6 +557,7 @@
     if (!RECS) return;
     var raw = qEl.value.trim().toLowerCase();
     clearB.style.display = qEl.value ? 'inline-block' : 'none';
+    if (!cityPan.hidden) renderCityPanel(); // keep city counts in sync with search
     var onlyContacted = onlyC.checked;
     var toks = raw ? raw.split(/\s+/).filter(Boolean) : [];
 
@@ -612,6 +655,7 @@
     else { CONTACTED.delete(k); if (li) li.classList.remove('done'); }
     saveContacted();
     updateContacted();
+    ctxSig = null; // contacted set changed -> recompute city counts on next open
     if (onlyC.checked) run(); // dropped rows leave the filtered view
   });
 
