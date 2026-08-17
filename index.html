@@ -134,6 +134,39 @@
   }
   .exportb:hover{border-color:var(--go);color:var(--go)}
 
+  /* city combobox */
+  .citywrap{position:relative;display:inline-flex;align-items:center}
+  .cityinput{
+    border:1px solid var(--line);border-radius:8px;background:#fff;
+    padding:7px 11px;font-size:14px;font-family:var(--sans);color:var(--ink);
+    min-width:190px;
+  }
+  .cityinput::placeholder{color:#a7aeb9}
+  .cityinput:focus{outline:2px solid var(--amber);outline-offset:0;border-color:var(--amber)}
+  .cityclear{
+    border:0;background:var(--line-2);color:var(--steel);border-radius:8px;
+    padding:6px 10px;cursor:pointer;font-family:var(--mono);font-size:12px;
+    letter-spacing:.04em;margin-left:6px;display:none;
+  }
+  .cityclear:hover{background:#ded9ce}
+  .citypanel{
+    position:absolute;z-index:30;top:calc(100% + 6px);left:0;
+    width:min(320px,84vw);max-height:340px;overflow:auto;
+    background:#fff;border:1px solid var(--line);border-radius:10px;
+    box-shadow:var(--shadow);padding:6px;
+  }
+  .cityopt{
+    display:flex;justify-content:space-between;gap:10px;align-items:center;
+    width:100%;text-align:left;border:0;background:transparent;cursor:pointer;
+    padding:8px 10px;border-radius:7px;font-size:14px;color:var(--ink);
+    font-family:var(--sans);
+  }
+  .cityopt:hover,.cityopt.active{background:#f2efe8}
+  .cityopt .c{font-family:var(--mono);font-size:11px;color:var(--mut);flex:0 0 auto}
+  .cityopt.reset{color:var(--steel);font-family:var(--mono);font-size:12px;
+    letter-spacing:.04em;border-bottom:1px solid var(--line-2);border-radius:0;margin-bottom:4px}
+  .citymore{padding:8px 10px;color:var(--mut);font-size:12px;font-family:var(--mono)}
+
   /* ---------- content ---------- */
   main{max-width:1000px;margin:0 auto;padding:16px 20px 64px}
 
@@ -265,6 +298,11 @@
 
 <div class="controls">
   <span class="count" id="count"></span>
+  <div class="citywrap">
+    <input type="text" id="city" class="cityinput" autocomplete="off" spellcheck="false" placeholder="Tüm şehirler" aria-label="Şehir seç">
+    <button type="button" id="cityClear" class="cityclear">TEMİZLE</button>
+    <div class="citypanel" id="cityPanel" hidden></div>
+  </div>
   <label class="scope"><input type="checkbox" id="scope" checked> Şehir / bölgede de ara</label>
   <span class="sep"></span>
   <label class="scope"><input type="checkbox" id="onlyContacted"> Sadece irtibata geçilenler</label>
@@ -293,10 +331,13 @@
   var RECS = null;        // [name, town, county, rating, [routes]]
   var LC   = null;        // lowercase name
   var LCF  = null;        // lowercase name + town + county
+  var LCT  = null;        // normalized town (for city filter)
+  var CITIES = [];        // [{key,disp,count}] sorted by count desc
   var CAP  = 500;
 
   var SKEY = 'ukspon_contacted_v1';
   var CONTACTED = new Set();
+  var cityKey = null;     // selected city (normalized) or null
 
   var loader = document.getElementById('loader');
   var view   = document.getElementById('view');
@@ -307,8 +348,12 @@
   var onlyC  = document.getElementById('onlyContacted');
   var cCont  = document.getElementById('cContacted');
   var exportB= document.getElementById('exportBtn');
+  var cityIn = document.getElementById('city');
+  var cityClr= document.getElementById('cityClear');
+  var cityPan= document.getElementById('cityPanel');
 
   function nfmt(n){ return n.toLocaleString('en-GB'); }
+  function normCity(s){ return (s||'').trim().replace(/\s+/g,' ').toLowerCase(); }
 
   // ---- contacted persistence ----
   function keyOf(r){ return r[0]+'\u0001'+r[1]+'\u0001'+r[2]+'\u0001'+r[3]; }
@@ -358,12 +403,26 @@
 
   function buildIndex(){
     var n = RECS.length;
-    LC = new Array(n); LCF = new Array(n);
+    LC = new Array(n); LCF = new Array(n); LCT = new Array(n);
+    var cm = new Map();
     for (var i=0;i<n;i++){
       var r = RECS[i];
       LC[i]  = r[0].toLowerCase();
       LCF[i] = (r[0]+' '+r[1]+' '+r[2]).toLowerCase();
+      var tk = normCity(r[1]);
+      LCT[i] = tk;
+      if (tk){
+        var o = cm.get(tk);
+        if (!o){ o = {disp:r[1].trim(), best:0, forms:{}}; cm.set(tk,o); }
+        o.count = (o.count||0) + 1;
+        var f = r[1].trim();
+        o.forms[f] = (o.forms[f]||0) + 1;
+        if (o.forms[f] > o.best){ o.best = o.forms[f]; o.disp = f; }
+      }
     }
+    CITIES = [];
+    cm.forEach(function(o, key){ CITIES.push({key:key, disp:o.disp, count:o.count}); });
+    CITIES.sort(function(a,b){ return b.count - a.count; });
   }
 
   // ---- rendering helpers ----
@@ -428,6 +487,30 @@
       + '</li>';
   }
 
+  // ---- city combobox ----
+  function renderCityPanel(){
+    var q = normCity(cityIn.value);
+    var list = q ? CITIES.filter(function(c){ return c.key.indexOf(q) > -1; }) : CITIES;
+    var cap = 60;
+    var html = '<button type="button" class="cityopt reset" data-key="">Tüm şehirler</button>';
+    for (var i=0;i<Math.min(list.length,cap);i++){
+      var c = list[i];
+      html += '<button type="button" class="cityopt" data-key="'+encodeURIComponent(c.key)+'" data-disp="'+esc(c.disp)+'">'
+            + '<span>'+esc(c.disp)+'</span><span class="c">'+nfmt(c.count)+'</span></button>';
+    }
+    if (list.length > cap){ html += '<div class="citymore">+'+nfmt(list.length-cap)+' şehir daha — yazarak daralt</div>'; }
+    if (!list.length){ html += '<div class="citymore">Eşleşen şehir yok</div>'; }
+    cityPan.innerHTML = html;
+    cityPan.hidden = false;
+  }
+  function selectCity(key, disp){
+    if (!key){ clearCity(); }
+    else { cityKey = key; cityIn.value = disp || ''; cityClr.style.display = 'inline-block'; }
+    cityPan.hidden = true;
+    run();
+  }
+  function clearCity(){ cityKey = null; cityIn.value = ''; cityClr.style.display = 'none'; }
+
   function run(){
     if (!RECS) return;
     var raw = qEl.value.trim().toLowerCase();
@@ -435,8 +518,8 @@
     var onlyContacted = onlyC.checked;
     var toks = raw ? raw.split(/\s+/).filter(Boolean) : [];
 
-    // no search and no filter -> intro hint
-    if (!toks.length && !onlyContacted){
+    // nothing active -> intro hint
+    if (!toks.length && !onlyContacted && !cityKey){
       showHint();
       countEl.innerHTML = "Toplam <b>"+nfmt(RECS.length)+"</b> şirket";
       return;
@@ -447,6 +530,7 @@
     var n = RECS.length;
 
     for (var i=0;i<n;i++){
+      if (cityKey && LCT[i] !== cityKey) continue;
       if (toks.length){
         var hay = src[i], ok = true;
         for (var t=0;t<toks.length;t++){
@@ -460,13 +544,17 @@
     }
 
     var total = matches.length;
+    var chips = [];
+    if (raw) chips.push("\u201C"+esc(qEl.value.trim())+"\u201D");
+    if (cityKey) chips.push(esc(cityIn.value.trim()));
+    var suffix = chips.length ? " — " + chips.join(" \u00b7 ") : "";
     var label = onlyContacted ? " irtibata geçilen" : " sonuç";
-    countEl.innerHTML = "<b>"+nfmt(total)+"</b>"+label + (raw ? " — \u201C"+esc(qEl.value.trim())+"\u201D" : "");
+    countEl.innerHTML = "<b>"+nfmt(total)+"</b>"+label+suffix;
 
     if (total === 0){
       var msg = onlyContacted
-        ? (raw ? "Bu aramada işaretli şirket yok." : "Henüz kimse işaretlenmedi. Sonuçlardaki kutuyu tıklayarak irtibata geçtiklerini işaretle.")
-        : "Farklı bir kelime dene ya da yazımı kontrol et.";
+        ? (raw || cityKey ? "Bu filtreyle işaretli şirket yok." : "Henüz kimse işaretlenmedi. Sonuçlardaki kutuyu tıklayarak irtibata geçtiklerini işaretle.")
+        : "Farklı bir kelime dene ya da şehri değiştir.";
       view.innerHTML = '<div class="empty"><b>Sonuç yok.</b><br>'+msg+'</div>';
       return;
     }
@@ -492,6 +580,26 @@
   scopeB.addEventListener('change', run);
   onlyC.addEventListener('change', run);
   clearB.addEventListener('click', function(){ qEl.value=''; clearB.style.display='none'; qEl.focus(); run(); });
+
+  // city combobox
+  cityIn.addEventListener('focus', renderCityPanel);
+  cityIn.addEventListener('input', renderCityPanel);
+  cityIn.addEventListener('keydown', function(e){
+    if (e.key === 'Escape'){ cityPan.hidden = true; }
+    else if (e.key === 'Enter'){
+      var first = cityPan.querySelector('.cityopt:not(.reset)');
+      if (first){ first.click(); e.preventDefault(); }
+    }
+  });
+  cityPan.addEventListener('click', function(e){
+    var b = e.target.closest ? e.target.closest('.cityopt') : null;
+    if (!b) return;
+    selectCity(decodeURIComponent(b.getAttribute('data-key')||''), b.getAttribute('data-disp')||'');
+  });
+  cityClr.addEventListener('click', function(){ clearCity(); cityPan.hidden = true; run(); cityIn.focus(); });
+  document.addEventListener('click', function(e){
+    if (!cityPan.hidden && !(e.target.closest && e.target.closest('.citywrap'))) cityPan.hidden = true;
+  });
 
   // tick a company as contacted (event delegation)
   view.addEventListener('change', function(e){
