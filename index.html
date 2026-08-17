@@ -125,6 +125,14 @@
     font-size:14px;color:var(--steel);cursor:pointer;user-select:none;
   }
   .scope input{accent-color:var(--amber-deep);width:16px;height:16px;cursor:pointer}
+  .sep{width:1px;height:18px;background:var(--line);display:inline-block}
+  .exportb{
+    border:1px solid var(--line);background:#fff;color:var(--steel);
+    border-radius:8px;padding:6px 11px;cursor:pointer;
+    font-family:var(--mono);font-size:12px;letter-spacing:.04em;
+    display:none;
+  }
+  .exportb:hover{border-color:var(--go);color:var(--go)}
 
   /* ---------- content ---------- */
   main{max-width:1000px;margin:0 auto;padding:16px 20px 64px}
@@ -159,6 +167,14 @@
     align-items:start;
   }
   .row:hover{border-color:var(--line)}
+  .row.done{border-color:#bfe0cd;box-shadow:inset 3px 0 0 var(--go);background:#fbfefc}
+  .tick{
+    display:inline-flex;align-items:center;gap:7px;cursor:pointer;
+    font-size:12.5px;color:var(--mut);user-select:none;
+    font-family:var(--mono);letter-spacing:.02em;margin-top:2px;
+  }
+  .tick input{accent-color:var(--go);width:16px;height:16px;cursor:pointer}
+  .row.done .tick{color:var(--go)}
   .name{
     font-size:17px;font-weight:700;letter-spacing:-.01em;
     grid-column:1;margin:0;
@@ -250,6 +266,10 @@
 <div class="controls">
   <span class="count" id="count"></span>
   <label class="scope"><input type="checkbox" id="scope" checked> Şehir / bölgede de ara</label>
+  <span class="sep"></span>
+  <label class="scope"><input type="checkbox" id="onlyContacted"> Sadece irtibata geçilenler</label>
+  <span class="count" id="cContacted"></span>
+  <button class="exportb" id="exportBtn" type="button">DIŞA AKTAR (CSV)</button>
 </div>
 
 <main>
@@ -275,14 +295,37 @@
   var LCF  = null;        // lowercase name + town + county
   var CAP  = 500;
 
+  var SKEY = 'ukspon_contacted_v1';
+  var CONTACTED = new Set();
+
   var loader = document.getElementById('loader');
   var view   = document.getElementById('view');
   var qEl    = document.getElementById('q');
   var clearB = document.getElementById('clear');
   var scopeB = document.getElementById('scope');
   var countEl= document.getElementById('count');
+  var onlyC  = document.getElementById('onlyContacted');
+  var cCont  = document.getElementById('cContacted');
+  var exportB= document.getElementById('exportBtn');
 
   function nfmt(n){ return n.toLocaleString('en-GB'); }
+
+  // ---- contacted persistence ----
+  function keyOf(r){ return r[0]+'\u0001'+r[1]+'\u0001'+r[2]+'\u0001'+r[3]; }
+  function loadContacted(){
+    try{
+      var raw = localStorage.getItem(SKEY);
+      if(raw){ JSON.parse(raw).forEach(function(k){ CONTACTED.add(k); }); }
+    }catch(e){/* storage yok / engelli - oturum içi çalışır */}
+  }
+  function saveContacted(){
+    try{ localStorage.setItem(SKEY, JSON.stringify(Array.from(CONTACTED))); }catch(e){}
+  }
+  function updateContacted(){
+    var n = CONTACTED.size;
+    cCont.innerHTML = "İrtibata geçilen: <b>"+nfmt(n)+"</b>";
+    exportB.style.display = n ? 'inline-block' : 'none';
+  }
 
   // ---- decode embedded gzip+base64 ----
   function loadData(){
@@ -301,9 +344,11 @@
       var text = new TextDecoder('utf-8').decode(buf);
       RECS = JSON.parse(text);
       buildIndex();
+      loadContacted();
       loader.hidden = true;
       view.hidden = false;
       countEl.innerHTML = "Toplam <b>" + nfmt(RECS.length) + "</b> şirket";
+      updateContacted();
       showHint();
       qEl.focus();
     }).catch(function(e){
@@ -365,17 +410,20 @@
     });
   }
 
-  function rowHTML(r, toks){
+  function rowHTML(i, toks){
+    var r = RECS[i];
+    var done = CONTACTED.has(keyOf(r));
     var loc = [r[1], r[2]].filter(Boolean).join(', ');
     var routes = r[4] && r[4].length
       ? '<div class="routes">' + r[4].map(function(x){return '<span class="route">'+esc(x)+'</span>';}).join('') + '</div>'
       : '';
-    return '<li class="row">'
+    return '<li class="row'+(done?' done':'')+'" data-i="'+i+'">'
       + '<p class="name">' + highlight(r[0], toks) + '</p>'
       + (loc ? '<div class="loc">' + highlight(loc, toks) + '</div>' : '<div class="loc"><span class="dash">konum belirtilmemiş</span></div>')
       + '<div class="badges">'
       +   '<span class="rating '+ratingClass(r[3])+'">'+esc(ratingLabel(r[3]))+'</span>'
       +   routes
+      +   '<label class="tick"><input type="checkbox" class="tickbox" data-i="'+i+'"'+(done?' checked':'')+'> İrtibata geçildi</label>'
       + '</div>'
       + '</li>';
   }
@@ -384,38 +432,49 @@
     if (!RECS) return;
     var raw = qEl.value.trim().toLowerCase();
     clearB.style.display = qEl.value ? 'inline-block' : 'none';
+    var onlyContacted = onlyC.checked;
+    var toks = raw ? raw.split(/\s+/).filter(Boolean) : [];
 
-    if (raw.length < 1){ showHint(); countEl.innerHTML = "Toplam <b>"+nfmt(RECS.length)+"</b> şirket"; return; }
+    // no search and no filter -> intro hint
+    if (!toks.length && !onlyContacted){
+      showHint();
+      countEl.innerHTML = "Toplam <b>"+nfmt(RECS.length)+"</b> şirket";
+      return;
+    }
 
-    var toks = raw.split(/\s+/).filter(Boolean);
     var src = scopeB.checked ? LCF : LC;
     var matches = [];
     var n = RECS.length;
 
     for (var i=0;i<n;i++){
-      var hay = src[i];
-      var ok = true;
-      for (var t=0;t<toks.length;t++){
-        if (hay.indexOf(toks[t]) === -1){ ok = false; break; }
+      if (toks.length){
+        var hay = src[i], ok = true;
+        for (var t=0;t<toks.length;t++){
+          if (hay.indexOf(toks[t]) === -1){ ok = false; break; }
+        }
+        if (!ok) continue;
       }
-      if (ok){
-        matches.push(i);
-        if (matches.length > 20000) break; // safety
-      }
+      if (onlyContacted && !CONTACTED.has(keyOf(RECS[i]))) continue;
+      matches.push(i);
+      if (matches.length > 20000) break; // safety
     }
 
     var total = matches.length;
-    countEl.innerHTML = "<b>"+nfmt(total)+"</b> sonuç" + (raw ? " — \u201C"+esc(qEl.value.trim())+"\u201D" : "");
+    var label = onlyContacted ? " irtibata geçilen" : " sonuç";
+    countEl.innerHTML = "<b>"+nfmt(total)+"</b>"+label + (raw ? " — \u201C"+esc(qEl.value.trim())+"\u201D" : "");
 
     if (total === 0){
-      view.innerHTML = '<div class="empty"><b>Sonuç yok.</b><br>Farklı bir kelime dene ya da yazımı kontrol et.</div>';
+      var msg = onlyContacted
+        ? (raw ? "Bu aramada işaretli şirket yok." : "Henüz kimse işaretlenmedi. Sonuçlardaki kutuyu tıklayarak irtibata geçtiklerini işaretle.")
+        : "Farklı bir kelime dene ya da yazımı kontrol et.";
+      view.innerHTML = '<div class="empty"><b>Sonuç yok.</b><br>'+msg+'</div>';
       return;
     }
 
     var shown = Math.min(total, CAP);
     var html = '<ul class="results">';
     for (var k=0;k<shown;k++){
-      html += rowHTML(RECS[matches[k]], toks);
+      html += rowHTML(matches[k], toks);
     }
     html += '</ul>';
     if (total > CAP){
@@ -431,7 +490,46 @@
 
   qEl.addEventListener('input', schedule);
   scopeB.addEventListener('change', run);
-  clearB.addEventListener('click', function(){ qEl.value=''; clearB.style.display='none'; qEl.focus(); showHint(); countEl.innerHTML="Toplam <b>"+nfmt(RECS.length)+"</b> şirket"; });
+  onlyC.addEventListener('change', run);
+  clearB.addEventListener('click', function(){ qEl.value=''; clearB.style.display='none'; qEl.focus(); run(); });
+
+  // tick a company as contacted (event delegation)
+  view.addEventListener('change', function(e){
+    var cb = e.target;
+    if (!cb || !cb.classList || !cb.classList.contains('tickbox')) return;
+    var i = parseInt(cb.getAttribute('data-i'), 10);
+    var k = keyOf(RECS[i]);
+    var li = cb.closest ? cb.closest('.row') : null;
+    if (cb.checked){ CONTACTED.add(k); if (li) li.classList.add('done'); }
+    else { CONTACTED.delete(k); if (li) li.classList.remove('done'); }
+    saveContacted();
+    updateContacted();
+    if (onlyC.checked) run(); // dropped rows leave the filtered view
+  });
+
+  // export contacted companies as CSV
+  exportB.addEventListener('click', function(){
+    if (!CONTACTED.size) return;
+    var rows = [['Organisation Name','Town/City','County','Type & Rating','Route']];
+    for (var i=0;i<RECS.length;i++){
+      var r = RECS[i];
+      if (CONTACTED.has(keyOf(r))){
+        rows.push([r[0], r[1], r[2], r[3], (r[4]||[]).join('; ')]);
+      }
+    }
+    var csv = rows.map(function(row){
+      return row.map(function(c){
+        c = (c==null?'':String(c));
+        return /[",\n\r]/.test(c) ? '"'+c.replace(/"/g,'""')+'"' : c;
+      }).join(',');
+    }).join('\r\n');
+    var blob = new Blob(['\ufeff'+csv], {type:'text/csv;charset=utf-8'});
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = 'irtibata-gecilenler.csv';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+  });
 
   loadData();
 })();
